@@ -1,6 +1,6 @@
 = PHP 8.4 будет поддерживать типы данных введённые в Firebird 4.0
 Симонов Денис
-v0.5 от 11.09.2024
+v0.6 от 11.09.2024
 :doctype: article
 :encoding: utf-8
 :lang: ru
@@ -8,9 +8,14 @@ v0.5 от 11.09.2024
 :experimental:
 :source-highlighter: coderay
 
+[dedication%notitle]
+--
+
+--
+
 Предстоящий релиз PHP 8.4, который должен выйти в конце 2024 года, содержит множество новых функций и улучшений, главные из которых обработчики свойств (https://wiki.php.net/rfc/property-hooks[property hooks]) и поддержка HTML5 а расширении DOM.
 
-В настоящее для тестирования доступна версия PHP 8.4 Beta 4.
+В настоящее для тестирования доступна версия PHP 8.4 Beta 4. Скачать готовые сборки для тестирования можно по ссылке https://php.watch/versions/8.4/releases/8.4.0beta4[8.4.0beta4]
 
 Разработчикам использующим СУБД Firebird будут интересны новые возможности работы с этой СУБД. 
 
@@ -667,4 +672,110 @@ array(2) {
 
 И здесь всё хорошо.
 
-Таким образом в предстоящий версии PHP 8.4 вы сможете работать со всеми типами данных Firebird 4.0 и Firebird 5.0 без дополнительных "костылей". Рад сообщить вам, что ваш покорный слуга лично приложил свою руку для обеспечения этой возможности.
+Таким образом в предстоящий версии PHP 8.4 вы сможете работать со всеми типами данных Firebird 4.0 и Firebird 5.0 без дополнительных "костылей". Рад сообщить вам, что ваш покорный слуга лично приложил свою руку для обеспечения этой возможности. Надеюсь данная статья и описанное нововведение ускорит миграцию на современные версии Firebird, в том числе на самую последнюю версию Firebird 5.0.
+
+== Nullable параметры
+
+Работая над поддержкой новых типов данных я вспомнил ещё об одной очень неприятной особенности драйвера pdo_firebird. Сейчас я её продемонстрирую.
+
+Допустим у вас есть таблица, описанная следующим образом:
+
+[source,sql]
+----
+create sequence gen_employee;
+
+create table employee (
+  employee_id bigint not null,
+  name varchar(50) not null,
+  lastname varchar(50)
+);
+
+set term ^;
+
+create trigger tr_employee_bi
+for employee before insert
+as
+begin
+  if (new.employee_id is null) then
+     new.employee_id = next value for gen_employee;
+end^
+
+set term ;^
+----
+
+Теперь попробуем выполнить следующий скрипт.
+
+.Скрипт index_nullable.php
+[source,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TS_SQL = <<<'SQL'
+    INSERT INTO employee (employee_id, name, lastname)
+	VALUES (?, ?, ?)
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/test;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute([null, 'John', 'Smith']);
+    echo "OK\n";
+	
+	$cur_stmt = $dbh->prepare('select * from employee');
+	$cur_stmt->execute();
+	$rows = $cur_stmt->fetchAll(PDO::FETCH_ASSOC);
+	var_dump($rows);
+    $cur_stmt->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+В результате получаем:
+
+----
+PHP version: 8.3.11
+Error: SQLSTATE[HY105]: Invalid parameter type: -999 Parameter requires non-null value
+----
+
+Всё дело в том, что драйвер опирается на информацию о параметрах, которую он получает в структуре SQLDA, где первый параметр описан как not nullable, поскольку поле `EMPLOYEE_ID` описано как `NOT NULL`. Но на самом деле в этот параметр возможно передать значение `NULL`, потому что существует триггер `tr_employee_bi`, который изменяет значение столбцов таблицы перед вставкой. Вообще nullable флаг полезен для выходных параметров, поскольку позволяет сэкономить на выделении памяти под индикатор значения NULL. но дл входных параметров такое поведение скорее вредит.
+
+Если мы попробуем выполнить следующий запрос, то он будет успешен
+
+[source,sql]
+----
+INSERT INTO employee (employee_id, name, lastname)
+VALUES (null, 'John', 'Smith')
+----
+
+Поскольку я всё равно начал заниматься драйвером pdo_firebird. то решил исправить и эту проблему. Теперь попробуем выполнить тоже самое на PHP 8.4. Результат:
+
+----
+PHP version: 8.4.0beta5
+OK
+array(1) {
+  [0]=>
+  array(3) {
+    ["EMPLOYEE_ID"]=>
+    int(2)
+    ["NAME"]=>
+    string(4) "John"
+    ["LASTNAME"]=>
+    string(5) "Smith"
+  }
+}
+----
+
+Теперь всё работает как ожидалось.
+
+== Режим изолированности транзакций
+
+TODO: Написать.
