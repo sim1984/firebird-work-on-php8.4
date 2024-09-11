@@ -1,10 +1,12 @@
 = PHP 8.4 будет поддерживать типы данных введённые в Firebird 4.0
 Симонов Денис
-v0.5 от 10.00.2024
+v0.5 от 11.09.2024
 :doctype: article
 :encoding: utf-8
 :lang: ru
 :icons: font
+:experimental:
+:source-highlighter: coderay
 
 Предстоящий релиз PHP 8.4, который должен выйти в конце 2024 года, содержит множество новых функций и улучшений, главные из которых обработчики свойств (https://wiki.php.net/rfc/property-hooks[property hooks]) и поддержка HTML5 а расширении DOM.
 
@@ -37,3 +39,632 @@ v0.5 от 10.00.2024
 Первые два типа данных не вызывают проблем, они используются редко и предназначены в основном для точных научных вычислений.
 
 С `TIME WITH TIME ZONE` и `TIMESTAMP WITH TIME ZONE` дела обстоят сложнее. Дело в том, что до введения этих типов данных контекстные переменные `CURRENT_TIME` и `CURRENT_TIMESTAMP` возвращали значения типов `TIME WITHOUT TIME ZONE` и `TIMESTAMP WITHOUT TIME ZONE`, хотя это противоречило стандарту SQL, теперь же они возвращают `TIME WITH TIME ZONE` и `TIMESTAMP WITH TIME ZONE`. Для возврата значений без информации о часовых поясах предусмотрены контекстные переменные `LOCALTIME` и `LOCALTIMESTAMP`. Поэтому те запросы, которые раньше работали корректно возвращают новые типы данных, которые неизвестны драйверу pdo_firebird.
+
+Попробуйте запустить следующий пример:
+
+.Скрипт index_ts.php
+[source,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TS_SQL = <<<'SQL'
+    SELECT 
+        CURRENT_TIMESTAMP AS TS_TZ, 
+        LOCALTIMESTAMP AS TS,
+        CURRENT_TIME AS T_TZ,
+        LOCALTIME AS T
+    FROM RDB$DATABASE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+В результате будет выведено следующее:
+
+----
+PHP version: 8.3.11
+Result:
+array(4) {
+  ["TS_TZ"]=>
+  NULL
+  ["TS"]=>
+  string(19) "2024-09-11 15:50:21"
+  ["T_TZ"]=>
+  NULL
+  ["T"]=>
+  string(8) "15:50:21"
+}
+----
+
+То есть для типов с часовыми поясами всегда возвращается значение `null`, поскольку драйвер ничего не знает о новых типах данных.
+
+Ещё хуже обстоят дела при использовании `NUMERIC` и `DECIMAL`. Дело в том, что при вычислении агрегатных функций `SUM` и `AVG`, а также при умножении, возвращается результат с наиболее широким типом данных. До Firebird 4.0 для типов `NUMERIC` и `DECIMAL` самым вместительным был тип `BIGINT`, что позволяло считать такие числа с точностью до 18 знаков. Начиная с Firebird 4.0 для `NUMERIC` и `DECIMAL` наиболее вместительным стал тип `INT128`. Это позволяет считать числа с точностью до 38 знаков. Таким образом, если ваши исходные типы данных были NUMERIC(18, x), то после этих операций они расширяются до `NUMERIC(38, x)`. Но pdo_firebird ничего не знает о новых типах данных.
+
+Попробуйте запустить следующий пример:
+
+.Скрипт index_n.php
+[source,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TS_SQL = <<<'SQL'
+    SELECT
+        SUM(SALARY) AS SUM_SALARY,
+        CAST(SUM(SALARY) AS NUMERIC(18, 2)) AS SUM_SALARY_2
+    FROM EMPLOYEE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+В результате будет выведено следующее:
+
+----
+PHP version: 8.3.11
+Result:
+array(2) {
+  ["SUM_SALARY"]=>
+  string(4) "0.01"
+  ["SUM_SALARY_2"]=>
+  string(11) "16203468.02"
+}
+----
+
+В данном случае вместо `null` вообще выведено непонятное число, что ещё хуже. Следует отметить, что поля `SUM_SALARY_2`, которое было искусственно преобразовано к типу `NUMERIC(18, 2)`, результат верный.
+
+Как уже говорилось ранее тип `DECFLOAT` сам по себе не возникнет в вашей базе данных, но если он всё же потребуется, то будет та же печальная картина.
+
+.Скрипт index_df.php
+[source,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TS_SQL = <<<'SQL'
+    SELECT
+        QUANTIZE(12354.678, 123.54) AS DF,
+        CAST(QUANTIZE(12354.678, 123.54) AS DOUBLE PRECISION) AS D
+    FROM RDB$DATABASE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+В результате будет выведено следующее:
+
+----
+PHP version: 8.3.11
+Result:
+array(2) {
+  ["DF"]=>
+  NULL
+  ["D"]=>
+  string(8) "12354.68"
+}
+----
+
+Что же делать в данном случае? На самом деле разработчики Firebird 4.0 прекрасно понимали, что новые типы в драйверах появятся не сразу, а потому позаботились о том чтобы эту проблему можно было решить одним из следующих способов:
+
+- установить параметр `DataTypeCompatibility` в значение '3.0' в `firebird.conf` или `database.conf`;
+- установить привязку новых типов данных к одному из тех, что поддерживается драйвером с помощью оператора `SET BIND OF`;
+- установить привязку новых типов данных к одному из тех, что поддерживается драйвером с помощью тега `isc_dpb_set_bind`.
+
+Драйвер pdo_firebird не позволяет самостоятельно конструировать буфер параметров соединения, поэтому третий вариант не подходит. Рассмотрим оставшиеся два.
+
+=== Параметр DataTypeCompatibility
+
+Суть этого параметра проста, он позволяет установить привязку новых типов данных к типам данных, которые существовали в указанной версии Firebird и наиболее близки по свойствам.
+
+На сегодняшний день он может принимать два значения "2.5" и "3.0". Все запросы на сервере будут работать с родными типами данных и только при передачи данных на клиента будут происходить следующие преобразования
+
+[cols="<1,<3,<3", options="header",stripes="none"]
+|===
+^| Значение параметра
+^| Native type
+^| Legacy type
+
+|2.5
+|BOOLEAN
+|CHAR(5)
+
+|2.5 или 3.0
+|DECFLOAT
+|DOUBLE PRECISION
+
+|2.5 или 3.0
+|INT128
+|BIGINT
+
+|2.5 или 3.0
+|TIME WITH TIME ZONE
+|TIME WITHOUT TIME ZONE
+
+|2.5 или 3.0
+|TIMESTAMP WITH TIME ZONE
+|TIMESTAMP WITHOUT TIME ZONE
+|===
+
+Давайте попробуем установить `DataTypeCompatibility = 3.0` и посмотреть на результаты выполнения наших скриптов.
+
+Результаты выполнения первого скрипта `index_ts.php`:
+
+----
+PHP version: 8.3.11
+Result:
+array(4) {
+  ["TS_TZ"]=>
+  string(19) "2024-09-11 16:51:24"
+  ["TS"]=>
+  string(19) "2024-09-11 16:51:24"
+  ["T_TZ"]=>
+  string(8) "16:51:24"
+  ["T"]=>
+  string(8) "16:51:24"
+}
+----
+
+Как видите результат не отличается для типов с часовыми поясами и без. 
+
+Результаты выполнения второго скрипта `index_n.php`:
+
+----
+PHP version: 8.3.11
+Result:
+array(2) {
+  ["SUM_SALARY"]=>
+  string(11) "16203468.02"
+  ["SUM_SALARY_2"]=>
+  string(11) "16203468.02"
+}
+----
+
+Тут сумма выводится верно.
+
+Результаты выполнения третьего скрипта `index_df.php`:
+
+----
+PHP version: 8.3.11
+Result:
+array(2) {
+  ["DF"]=>
+  string(8) "12354.68"
+  ["D"]=>
+  string(8) "12354.68"
+}
+----
+
+Этот способ решения проблемы хорош тем что наиболее прост для того чтобы заставить ваши старые проекты работать правильно без каких-либо изменений кода, но он имеет существенные недостатки:
+
+- не всегда имеется возможность редактировать конфигурационные файлы `firebird.conf` или `databases.conf`;
+- теряется информация об истинных значениях полей.
+
+Что если завтра вам всё таки потребуется информация о часовом поясе? Что если сумма превышает вместимость `NUMERIC(18, x)`? Эту проблему можно решить с помощью SQL оператора `SET BIND OF`.
+
+Давайте уберём `DataTypeCompatibility = 3.0` из конфигурационного файла и посмотрим на второй способ решения проблемы.
+
+=== Использование оператора SET BIND OF
+
+Синтаксис оператора `SET BIND OF` выглядит следующим образом:
+
+.Синтаксис оператора SET BIND OF
+[listing]
+----
+SET BIND
+  OF {<type-from> | TIME ZONE}
+  TO { <type-to> | LEGACY | EXTENDED | NATIVE }
+----
+
+.Параметры оператора `SET BIND OF`
+[cols="<1,<3", options="header",stripes="none"]
+|===
+^| Параметр
+^| Описание
+
+|type-from
+|Тип данных для которого задаётся правило преобразования.
+
+|type-to
+|Тип данных в который следует преобразовать.
+|===
+
+
+Данный оператор позволяет задать правила описания типов возвращаемых клиенту нестандартным способом --
+тип _type-from_ автоматически преобразуется к типу _type-to_.
+
+Если используется неполное определение типа (например `CHAR` вместо `CHAR(_n_)`) в левой части `SET BIND OF` приведения,
+то преобразование будет осуществляться для всех `CHAR` столбцов, а не только для `CHAR(1)`.
+
+Специальный неполный тип `TIME ZONE` обозначает все типы, а именно `{TIME | TIMESTAMP} WITH TIME ZONE`.
+Когда неполное определение типа используется в правой части оператора (часть `TO`),
+сервер автоматически определит недостающие детали этого типа на основе исходного столбца.
+
+Изменение связывания любого `NUMERIC` и `DECIMAL` типа не влияет на соответствующий базовый целочисленный тип.
+Напротив, изменение привязки целочисленного типа данных также влияет на соответствующие `NUMERIC` и `DECIMAL`.
+
+Ключевое слово `LEGACY` в части `TO` используется, когда тип данных, отсутствующий в предыдущей версии Firebird, должен быть представлен способом понятным для старого клиентского программного обеспечения (возможна некоторая потеря данных). Существуют следующие преобразования в `LEGACY` типы:
+
+.Преобразования в legacy типы
+[cols="<1,<1", options="header",stripes="none"]
+|===
+^| Native тип
+^| Legacy тип
+
+|BOOLEAN
+|CHAR(5)
+
+|DECFLOAT
+|DOUBLE PRECISION
+
+|INT128
+|BIGINT
+
+|TIME WITH TIME ZONE
+|TIME WITHOUT TIME ZONE
+
+|TIMESTAMP WITH TIME ZONE
+|TIMESTAMP WITHOUT TIME ZONE
+|===
+
+Использование `EXTENDED` в части `TO` заставляет Firebird использовать расширенную форму типа в части FROM.
+В настоящее время он работает только для `{TIME | TIMESTAMP} WITH TIME ZONE` -- они принудительно приводятся
+к `EXTENDED {TIME | TIMESTAMP} WITH TIME ZONE`.
+
+Установка `NATIVE` означает, что тип будет использоваться так, как если бы для него не было предыдущих правил преобразования.
+
+Давайте посмотрим применение оператора `SET BIND OF` на одном из наших примеров. Для начала приведём все новые типы данных к соответствующим LEGACY типам.
+
+.Скрипт index_ts_bind_legacy.php
+[source,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const COERCE_SQL = <<<'SQL'
+   EXECUTE BLOCK
+   AS
+   BEGIN
+       SET BIND OF TIME ZONE TO LEGACY;
+       SET BIND OF INT128 TO LEGACY;
+       SET BIND OF DECFLOAT TO LEGACY;
+   END
+SQL;
+
+const TS_SQL = <<<'SQL'
+    SELECT 
+        CURRENT_TIMESTAMP AS TS_TZ, 
+        LOCALTIMESTAMP AS TS,
+        CURRENT_TIME AS T_TZ,
+        LOCALTIME AS T
+    FROM RDB$DATABASE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $dbh->exec(COERCE_SQL);
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+В результате будет выведено следующее:
+
+----
+PHP version: 8.3.11
+Result:
+array(4) {
+  ["TS_TZ"]=>
+  string(19) "2024-09-11 17:26:33"
+  ["TS"]=>
+  string(19) "2024-09-11 17:26:33"
+  ["T_TZ"]=>
+  string(8) "17:26:33"
+  ["T"]=>
+  string(8) "17:26:33"
+}
+----
+
+Как видим результат тот же самый, что и при установке `DataTypeCompatibility = 3.0`. Для остальных примеров будет тоже самое.
+
+Но оператор `SET BIND OF` гораздо более мощный. Мы можем любой тип данных преобразовать в любой другой совместимый тип. Поскольку в языке php не существует родных типов данных для представления типов данных Firebird 4.0, то наиболее логично вывести их строковое представление. Давайте попробуем сделать это.
+
+.Скрипт index_ts_bind.php
+[source,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const COERCE_SQL = <<<'SQL'
+   EXECUTE BLOCK
+   AS
+   BEGIN
+       SET BIND OF TIME ZONE TO VARCHAR;
+       SET BIND OF INT128 TO VARCHAR;
+       SET BIND OF DECFLOAT TO VARCHAR;
+   END
+SQL;
+
+const TS_SQL = <<<'SQL'
+    SELECT 
+        CURRENT_TIMESTAMP AS TS_TZ, 
+        LOCALTIMESTAMP AS TS,
+        CURRENT_TIME AS T_TZ,
+        LOCALTIME AS T
+    FROM RDB$DATABASE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $dbh->exec(COERCE_SQL);
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+В результате будет выведено следующее:
+
+----
+PHP version: 8.3.11
+Result:
+array(4) {
+  ["TS_TZ"]=>
+  string(38) "2024-09-11 17:33:23.9400 Europe/Moscow"
+  ["TS"]=>
+  string(19) "2024-09-11 17:33:23"
+  ["T_TZ"]=>
+  string(27) "17:33:23.0000 Europe/Moscow"
+  ["T"]=>
+  string(8) "17:33:23"
+}
+----
+
+Отличный результат! Для двух других примеров тоже всё хорошо. Достаточно сразу после соединения выполнить дополнительный запрос для привязки типов данных и вы можете выводить новые типы данных без потерь. Но у этого способа тоже есть недостатки:
+
+- установку привязки типов данных надо делать при каждом соединении, а это дополнительный запрос к Firebird. Кроме того, если создание вашего соединения с базой данных не централизовано, то придётся менять код вашего приложения в каждом из этих мест.
+- формат вывода даты и времени зависит от текущей локали, поэтому при переносе в другую среду формат вывода может изменится.
+
+== Работа с Firebird 4.0 в PHP 8.4
+
+Ну а теперь посмотрим, как работают наши скрипты в PHP 8.4.
+
+.Скрипт index_ts.php
+[source,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TS_SQL = <<<'SQL'
+    SELECT 
+        CURRENT_TIMESTAMP AS TS_TZ, 
+        LOCALTIMESTAMP AS TS,
+        CURRENT_TIME AS T_TZ,
+        LOCALTIME AS T
+    FROM RDB$DATABASE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+В результате будет выведено следующее:
+
+----
+PHP version: 8.4.0beta4
+Result:
+array(4) {
+  ["TS_TZ"]=>
+  string(33) "2024-09-11 17:44:52 Europe/Moscow"
+  ["TS"]=>
+  string(19) "2024-09-11 17:44:52"
+  ["T_TZ"]=>
+  string(22) "17:44:52 Europe/Moscow"
+  ["T"]=>
+  string(8) "17:44:52"
+}
+----
+
+Отлично. Мы ничего не меняли и всё заработало "из коробки".
+
+Теперь посмотрим на пример с суммами.
+
+.Скрипт index_n.php
+[source,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TS_SQL = <<<'SQL'
+    SELECT
+        SUM(SALARY) AS SUM_SALARY,
+        CAST(SUM(SALARY) AS NUMERIC(18, 2)) AS SUM_SALARY_2
+    FROM EMPLOYEE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+В результате будет выведено следующее:
+
+----
+PHP version: 8.4.0beta4
+Result:
+array(2) {
+  ["SUM_SALARY"]=>
+  string(11) "16203468.02"
+  ["SUM_SALARY_2"]=>
+  string(11) "16203468.02"
+}
+----
+
+Тоже хорошо.
+
+И наконец пример с `DECFLOAT`.
+
+.Скрипт index_df.php
+[source,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TS_SQL = <<<'SQL'
+    SELECT
+        QUANTIZE(12354.678, 123.54) AS DF,
+        CAST(QUANTIZE(12354.678, 123.54) AS DOUBLE PRECISION) AS D
+    FROM RDB$DATABASE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+В результате будет выведено следующее:
+
+----
+PHP version: 8.4.0beta4
+Result:
+array(2) {
+  ["DF"]=>
+  string(8) "12354.68"
+  ["D"]=>
+  string(8) "12354.68"
+}
+----
+
+И здесь всё хорошо.
+
+Таким образом в предстоящий версии PHP 8.4 вы сможете работать со всеми типами данных Firebird 4.0 и Firebird 5.0 без дополнительных "костылей". Рад сообщить вам, что ваш покорный слуга лично приложил свою руку для обеспечения этой возможности.
