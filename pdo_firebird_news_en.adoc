@@ -73,7 +73,6 @@ namespace MyApp;
 
 use PDO;
 use PDOException;
-use PDOStatement;
 
 const TS_SQL = <<<'SQL'
     SELECT 
@@ -132,7 +131,6 @@ namespace MyApp;
 
 use PDO;
 use PDOException;
-use PDOStatement;
 
 const TS_SQL = <<<'SQL'
     SELECT
@@ -183,7 +181,6 @@ namespace MyApp;
 
 use PDO;
 use PDOException;
-use PDOStatement;
 
 const TS_SQL = <<<'SQL'
     SELECT
@@ -399,7 +396,6 @@ namespace MyApp;
 
 use PDO;
 use PDOException;
-use PDOStatement;
 
 const COERCE_SQL = <<<'SQL'
    EXECUTE BLOCK
@@ -467,7 +463,6 @@ namespace MyApp;
 
 use PDO;
 use PDOException;
-use PDOStatement;
 
 const COERCE_SQL = <<<'SQL'
    EXECUTE BLOCK
@@ -540,7 +535,6 @@ namespace MyApp;
 
 use PDO;
 use PDOException;
-use PDOStatement;
 
 const TS_SQL = <<<'SQL'
     SELECT 
@@ -597,7 +591,6 @@ namespace MyApp;
 
 use PDO;
 use PDOException;
-use PDOStatement;
 
 const TS_SQL = <<<'SQL'
     SELECT
@@ -648,7 +641,6 @@ namespace MyApp;
 
 use PDO;
 use PDOException;
-use PDOStatement;
 
 const TS_SQL = <<<'SQL'
     SELECT
@@ -730,7 +722,6 @@ namespace MyApp;
 
 use PDO;
 use PDOException;
-use PDOStatement;
 
 const TS_SQL = <<<'SQL'
     INSERT INTO employee (employee_id, name, lastname)
@@ -808,7 +799,6 @@ namespace MyApp;
 
 use PDO;
 use PDOException;
-use PDOStatement;
 
 const TNX_PROP_SQL = <<<'SQL'
     SELECT
@@ -889,7 +879,6 @@ namespace MyApp;
 
 use PDO;
 use PDOException;
-use PDOStatement;
 
 const TNX_PROP_SQL = <<<'SQL'
     SELECT
@@ -1021,7 +1010,6 @@ namespace MyApp;
 
 use PDO;
 use PDOException;
-use PDOStatement;
 
 const TNX_PROP_SQL = <<<'SQL'
     SELECT
@@ -1111,7 +1099,6 @@ namespace MyApp;
 
 use PDO;
 use PDOException;
-use PDOStatement;
 
 const TNX_PROP_SQL = <<<'SQL'
     SELECT
