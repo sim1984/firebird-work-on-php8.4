@@ -1,0 +1,1188 @@
+= PHP 8.4 improvements when working with modern Firebird versions
+Simonov Denis
+v1.0 by 2024-09-12
+:doctype: article
+:encoding: utf-8
+:lang: en
+:icons: font
+:experimental:
+ifdef::backend-pdf[]
+:pdf-fontsdir: theme/fonts
+:pdf-themesdir: theme/firebird-pdf
+:pdf-theme: firebird
+:source-highlighter: pygments
+endif::[]
+ifdef::backend-html5[]
+:stylesdir: theme/firebird-html
+:stylesheet: firebird.css
+:source-highlighter: highlight.js
+endif::[]
+
+[dedication%notitle]
+--
+
+--
+
+The upcoming PHP 8.4 release, due out in late 2024, brings many new features and improvements, most notably property hooks (https://wiki.php.net/rfc/property-hooks[property hooks]) and HTML5 support in the DOM extension.
+
+PHP 8.4 Beta 4 is currently available for testing. You can download ready-made builds for testing at https://php.watch/versions/8.4/releases/8.4.0beta5[8.4.0beta5].
+
+Developers using Firebird DBMS will be interested in new opportunities for working with this DBMS.
+
+== Historical background
+
+As you know, starting with PHP 7.4, the main and only driver for working with Firebird is the extension https://www.php.net/manual/en/ref.pdo-firebird.php[pdo_firebird]. The extension https://www.php.net/manual/en/ibase.installation.php[Firebird/InterBase] was moved to PECL and is not supplied with PHP.
+
+In 2016, I was writing a series of articles on working with the Firebird DBMS from various programming languages, which later formed the basis of https://firebirdsql.org/file/documentation/pdf/en/refdocs/fbdevgd30/firebird-30-developers-guide.pdf[Firebird 3.0 Developer's Guide]. At that time, PHP 7.0 and Firebird 3.0 were relevant. One of these articles described how to work with Firebird from PHP, and it also compared the pdo_firebird and Firebird/InterBase extensions. There I also noted that almost all frameworks and ORMs used PDO, since it provides a unified interface for working with various DBMS. I myself practically did not use pdo_firebird in my developments, because at that time it contained many errors. The Firebird/InterBase extension was much more stable. But even then I understood that the future belongs to PDO and something needs to be changed.
+
+One day, a thread was created on a popular forum discussing errors in the pdo_firebird driver, and one of the forum members plucked up the courage to fix several errors by making corresponding Pull Requests. People continued to post bug reports in this thread hoping that he would fix them. Then I decided to join in and try to fix something, and I succeeded. Here is a short list of what I fixed:
+
+- memory leak when working with the BLOB data type;
+- support for the `BOOLEAN` data type for query input parameters;
+- support for 1 sql dialect;
+- improved parsing of named parameters in the `EXECUTE BLOCK` operator.
+
+So when the PHP team decided to remove the Firebird/InterBase extension from PHP, I wasn't too upset. By that time, the pdo_firebird extension had already become stable, and I easily replaced the Firebird/InterBase extension with it.
+
+== Working with Firebird at the moment
+
+As you know, new data types were added in Firebird 4.0:
+
+- `DECFLOAT(16)` and `DECFLOAT(34)`;
+- `TIME WITH TIME ZONE` and `TIMESTAMP WITH TIME ZONE`;
+- `INT128`, which is the basis of `NUMERIC(38, x)` and `DECIMAL(38, x)`.
+
+The first two data types are not problematic, they are rarely used and are intended mainly for precise scientific calculations.
+
+Things are more complicated with `TIME WITH TIME ZONE` and `TIMESTAMP WITH TIME ZONE`. The fact is that before these data types were introduced, the `CURRENT_TIME` and `CURRENT_TIMESTAMP` context variables returned values ​​of the `TIME WITHOUT TIME ZONE` and `TIMESTAMP WITHOUT TIME ZONE` types, although this contradicted the SQL standard, but now they return `TIME WITH TIME ZONE` and `TIMESTAMP WITH TIME ZONE`. The `LOCALTIME` and `LOCALTIMESTAMP` context variables are provided to return values ​​without time zone information. Therefore, the queries that previously worked correctly return new data types that are unknown to the pdo_firebird driver.
+
+Try running the following example:
+
+.Script index_ts.php
+[source%autofit,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TS_SQL = <<<'SQL'
+    SELECT 
+        CURRENT_TIMESTAMP AS TS_TZ, 
+        LOCALTIMESTAMP AS TS,
+        CURRENT_TIME AS T_TZ,
+        LOCALTIME AS T
+    FROM RDB$DATABASE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+The result will be the following:
+
+----
+PHP version: 8.3.11
+Result:
+array(4) {
+  ["TS_TZ"]=>
+  NULL
+  ["TS"]=>
+  string(19) "2024-09-11 15:50:21"
+  ["T_TZ"]=>
+  NULL
+  ["T"]=>
+  string(8) "15:50:21"
+}
+----
+
+That is, for types with time zones, the value `null` is always returned, since the driver does not know anything about the new data types.
+
+The situation is even worse when using `NUMERIC` and `DECIMAL`. The fact is that when calculating the aggregate functions `SUM` and `AVG`, as well as when multiplying, the result with the widest data type is returned. Before Firebird 4.0, the most capacious type for `NUMERIC` and `DECIMAL` was `BIGINT`, which allowed such numbers to be calculated with an accuracy of up to 18 digits. Starting with Firebird 4.0, the most capacious type for `NUMERIC` and `DECIMAL` is `INT128`. This allows numbers to be calculated with an accuracy of up to 38 digits. Thus, if your original data types were `NUMERIC(18, x)`, then after these operations they are expanded to `NUMERIC(38, x)`. But pdo_firebird does not know anything about the new data types.
+
+Try running the following example:
+
+.Script index_n.php
+[source%autofit,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TS_SQL = <<<'SQL'
+    SELECT
+        SUM(SALARY) AS SUM_SALARY,
+        CAST(SUM(SALARY) AS NUMERIC(18, 2)) AS SUM_SALARY_2
+    FROM EMPLOYEE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+The result will be the following:
+
+----
+PHP version: 8.3.11
+Result:
+array(2) {
+  ["SUM_SALARY"]=>
+  string(4) "0.01"
+  ["SUM_SALARY_2"]=>
+  string(11) "16203468.02"
+}
+----
+
+In this case, instead of `null`, an incomprehensible number is displayed, which is even worse. It should be noted that the `SUM_SALARY_2` field, which was artificially converted to the `NUMERIC(18, 2)` type, the result is correct.
+
+As mentioned earlier, the `DECFLOAT` type itself will not appear in your database, but if it is still required, the same sad picture will occur.
+
+.Script index_df.php
+[source%autofit,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TS_SQL = <<<'SQL'
+    SELECT
+        QUANTIZE(12354.678, 123.54) AS DF,
+        CAST(QUANTIZE(12354.678, 123.54) AS DOUBLE PRECISION) AS D
+    FROM RDB$DATABASE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+The result will be the following:
+
+----
+PHP version: 8.3.11
+Result:
+array(2) {
+  ["DF"]=>
+  NULL
+  ["D"]=>
+  string(8) "12354.68"
+}
+----
+
+What to do in this case? In fact, the Firebird 4.0 developers were well aware that the new types would not appear in the drivers immediately, and therefore made sure that this problem could be solved in one of the following ways:
+
+- set the `DataTypeCompatibility` parameter to '3.0' in `firebird.conf` or `database.conf`;
+- set the binding of the new data types to one of those supported by the driver using the `SET BIND OF` operator;
+- set the binding of the new data types to one of those supported by the driver using the `isc_dpb_set_bind` tag.
+
+The pdo_firebird driver does not allow you to construct a connection parameter buffer yourself, so the third option is not suitable. Let's consider the remaining two.
+
+=== DataTypeCompatibility parameter
+
+The essence of this parameter is simple, it allows you to set the binding of new data types to the data types that existed in the specified version of Firebird and are closest in properties.
+
+To date, it can take two values ​​"2.5" and "3.0". All requests on the server will work with native data types and only when transmitting data to the client will the following transformations occur:
+
+[cols="<1,<3,<3", options="header",stripes="none"]
+|===
+^| Parameter value
+^| Native type
+^| Legacy type
+
+|2.5
+|BOOLEAN
+|CHAR(5)
+
+|2.5 or 3.0
+|DECFLOAT
+|DOUBLE PRECISION
+
+|2.5 or 3.0
+|INT128
+|BIGINT
+
+|2.5 or 3.0
+|TIME WITH TIME ZONE
+|TIME WITHOUT TIME ZONE
+
+|2.5 or 3.0
+|TIMESTAMP WITH TIME ZONE
+|TIMESTAMP WITHOUT TIME ZONE
+|===
+
+Let's try setting `DataTypeCompatibility = 3.0` and see the results of executing our scripts.
+
+Results of executing the first script `index_ts.php`:
+
+----
+PHP version: 8.3.11
+Result:
+array(4) {
+  ["TS_TZ"]=>
+  string(19) "2024-09-11 16:51:24"
+  ["TS"]=>
+  string(19) "2024-09-11 16:51:24"
+  ["T_TZ"]=>
+  string(8) "16:51:24"
+  ["T"]=>
+  string(8) "16:51:24"
+}
+----
+
+As you can see, the result is no different for types with and without time zones.
+
+Results of executing the second script `index_n.php`:
+
+----
+PHP version: 8.3.11
+Result:
+array(2) {
+  ["SUM_SALARY"]=>
+  string(11) "16203468.02"
+  ["SUM_SALARY_2"]=>
+  string(11) "16203468.02"
+}
+----
+
+Here the sum is displayed correctly.
+
+Results of the third script `index_df.php`:
+
+----
+PHP version: 8.3.11
+Result:
+array(2) {
+  ["DF"]=>
+  string(8) "12354.68"
+  ["D"]=>
+  string(8) "12354.68"
+}
+----
+
+This solution is good because it is the easiest to make your old projects work correctly without any code changes, but it has significant drawbacks:
+
+- it is not always possible to edit the `firebird.conf` or `databases.conf` configuration files;
+- information about the true values ​​of the fields is lost.
+
+What if tomorrow you still need information about the time zone? What if the amount exceeds the capacity of `NUMERIC(18, x)`? This problem can be solved using the SQL statement `SET BIND OF`.
+
+Let's remove `DataTypeCompatibility = 3.0` from the configuration file and look at the second solution.
+
+=== Using the SET BIND OF statement
+
+The syntax of the `SET BIND OF` statement is as follows:
+
+.The syntax of the `SET BIND OF` statement
+[listing]
+----
+SET BIND
+  OF {<type-from> | TIME ZONE}
+  TO { <type-to> | LEGACY | EXTENDED | NATIVE }
+----
+
+.Parameters of the `SET BIND OF` statement
+[cols="<1,<3", options="header",stripes="none"]
+|===
+^| Parameter
+^| Description
+
+|type-from
+|The data type for which the conversion rule is specified.
+
+|type-to
+|The data type to convert to.
+|===
+
+
+This statements allows you to specify rules for describing types returned to the client in a non-standard way --
+the _type-from_ type is automatically converted to the _type-to_ type.
+
+If an incomplete type definition is used (e.g. `CHAR` instead of `CHAR(_n_)`) on the left side of a `SET BIND OF` cast,
+the conversion will be performed for all `CHAR` columns, not just `CHAR(1)`.
+
+The special incomplete type `TIME ZONE` stands for all types, namely `{TIME | TIMESTAMP} WITH TIME ZONE`.
+
+When an incomplete type definition is used on the right side of the statement (the `TO` part),
+the server will automatically determine the missing details of that type based on the source column.
+
+Changing the binding of any `NUMERIC` and `DECIMAL` type does not affect the corresponding underlying integer type.
+In contrast, changing the binding of an integer data type also affects the corresponding `NUMERIC` and `DECIMAL`.
+
+The `LEGACY` keyword in the `TO` part is used when a data type not present in the previous version of Firebird must be represented in a way understandable to older client software (some data loss may occur). The following conversions to `LEGACY` types exist:
+
+.Conversions to legacy types
+[cols="<1,<1", options="header",stripes="none"]
+|===
+^| Native type
+^| Legacy type
+
+|BOOLEAN
+|CHAR(5)
+
+|DECFLOAT
+|DOUBLE PRECISION
+
+|INT128
+|BIGINT
+
+|TIME WITH TIME ZONE
+|TIME WITHOUT TIME ZONE
+
+|TIMESTAMP WITH TIME ZONE
+|TIMESTAMP WITHOUT TIME ZONE
+|===
+
+Using `EXTENDED` in the `TO` part forces Firebird to use the extended form of the type in the FROM part. Currently, it only works for `{TIME | TIMESTAMP} WITH TIME ZONE` -- they are forced to `EXTENDED {TIME | TIMESTAMP} WITH TIME ZONE`.
+
+Setting `NATIVE` means that the type will be used as if there were no previous conversion rules for it.
+
+Let's see the use of the `SET BIND OF` statement in one of our examples. First, we'll cast all new data types to the corresponding LEGACY types.
+
+.Script index_ts_bind_legacy.php
+[source%autofit,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const COERCE_SQL = <<<'SQL'
+   EXECUTE BLOCK
+   AS
+   BEGIN
+       SET BIND OF TIME ZONE TO LEGACY;
+       SET BIND OF INT128 TO LEGACY;
+       SET BIND OF DECFLOAT TO LEGACY;
+   END
+SQL;
+
+const TS_SQL = <<<'SQL'
+    SELECT 
+        CURRENT_TIMESTAMP AS TS_TZ, 
+        LOCALTIMESTAMP AS TS,
+        CURRENT_TIME AS T_TZ,
+        LOCALTIME AS T
+    FROM RDB$DATABASE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $dbh->exec(COERCE_SQL);
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+The result will be the following:
+
+----
+PHP version: 8.3.11
+Result:
+array(4) {
+  ["TS_TZ"]=>
+  string(19) "2024-09-11 17:26:33"
+  ["TS"]=>
+  string(19) "2024-09-11 17:26:33"
+  ["T_TZ"]=>
+  string(8) "17:26:33"
+  ["T"]=>
+  string(8) "17:26:33"
+}
+----
+
+As you can see, the result is the same as when setting `DataTypeCompatibility = 3.0`. For the other examples, it will be the same.
+
+But the `SET BIND OF` statement is much more powerful. We can convert any data type to any other compatible type. Since PHP does not have native data types to represent Firebird 4.0 data types, it is most logical to output their string representation. Let's try to do this.
+
+.Script index_ts_bind.php
+[source%autofit,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const COERCE_SQL = <<<'SQL'
+   EXECUTE BLOCK
+   AS
+   BEGIN
+       SET BIND OF TIME ZONE TO VARCHAR;
+       SET BIND OF INT128 TO VARCHAR;
+       SET BIND OF DECFLOAT TO VARCHAR;
+   END
+SQL;
+
+const TS_SQL = <<<'SQL'
+    SELECT 
+        CURRENT_TIMESTAMP AS TS_TZ, 
+        LOCALTIMESTAMP AS TS,
+        CURRENT_TIME AS T_TZ,
+        LOCALTIME AS T
+    FROM RDB$DATABASE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $dbh->exec(COERCE_SQL);
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+The result will be the following:
+
+----
+PHP version: 8.3.11
+Result:
+array(4) {
+  ["TS_TZ"]=>
+  string(38) "2024-09-11 17:33:23.9400 Europe/Moscow"
+  ["TS"]=>
+  string(19) "2024-09-11 17:33:23"
+  ["T_TZ"]=>
+  string(27) "17:33:23.0000 Europe/Moscow"
+  ["T"]=>
+  string(8) "17:33:23"
+}
+----
+
+Excellent result! Everything is fine for the other two examples as well. It is enough to perform an additional query for binding data types immediately after the connection and you can output new data types without losses. But this method also has disadvantages:
+
+- the data type binding must be set for each connection, and this is an additional query to Firebird. In addition, if the creation of your database connection is not centralized, you will have to change the code of your application in each of these places.
+- the date and time output format depends on the current locale, so when transferring to another environment, the output format may change.
+
+== Working with Firebird 4.0 in PHP 8.4
+
+Well, now let's see how our scripts work in PHP 8.4.
+
+.Script index_ts.php
+[source%autofit,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TS_SQL = <<<'SQL'
+    SELECT 
+        CURRENT_TIMESTAMP AS TS_TZ, 
+        LOCALTIMESTAMP AS TS,
+        CURRENT_TIME AS T_TZ,
+        LOCALTIME AS T
+    FROM RDB$DATABASE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+The result will be the following:
+
+----
+PHP version: 8.4.0beta5
+Result:
+array(4) {
+  ["TS_TZ"]=>
+  string(33) "2024-09-11 17:44:52 Europe/Moscow"
+  ["TS"]=>
+  string(19) "2024-09-11 17:44:52"
+  ["T_TZ"]=>
+  string(22) "17:44:52 Europe/Moscow"
+  ["T"]=>
+  string(8) "17:44:52"
+}
+----
+
+Great. We didn't change anything and everything worked out of the box.
+
+Now let's look at an example with amounts.
+
+.Script index_n.php
+[source%autofit,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TS_SQL = <<<'SQL'
+    SELECT
+        SUM(SALARY) AS SUM_SALARY,
+        CAST(SUM(SALARY) AS NUMERIC(18, 2)) AS SUM_SALARY_2
+    FROM EMPLOYEE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+The result will be the following:
+
+----
+PHP version: 8.4.0beta5
+Result:
+array(2) {
+  ["SUM_SALARY"]=>
+  string(11) "16203468.02"
+  ["SUM_SALARY_2"]=>
+  string(11) "16203468.02"
+}
+----
+
+That's also good.
+
+And finally, an example with `DECFLOAT`.
+
+.Script index_df.php
+[source%autofit,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TS_SQL = <<<'SQL'
+    SELECT
+        QUANTIZE(12354.678, 123.54) AS DF,
+        CAST(QUANTIZE(12354.678, 123.54) AS DOUBLE PRECISION) AS D
+    FROM RDB$DATABASE
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute();
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    echo "Result: \n";
+    var_dump($row);
+    echo "\n";
+    $sth->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+The result will be the following:
+
+----
+PHP version: 8.4.0beta5
+Result:
+array(2) {
+  ["DF"]=>
+  string(8) "12354.68"
+  ["D"]=>
+  string(8) "12354.68"
+}
+----
+
+And here everything is fine.
+
+Thus, in the upcoming version of PHP 8.4 you will be able to work with all Firebird 4.0 and Firebird 5.0 data types without additional "cheats". I am glad to inform you that your humble servant personally contributed to providing this opportunity. I hope this article and the described innovation will speed up the migration to modern versions of Firebird, including the latest version of Firebird 5.0.
+
+== Nullable parameters
+
+While working on support for new data types, I remembered another very unpleasant feature of the pdo_firebird driver. I will demonstrate it now.
+
+Let's say you have a table described as follows:
+
+[source,sql]
+----
+create sequence gen_employee;
+
+create table employee (
+  employee_id bigint not null,
+  name varchar(50) not null,
+  lastname varchar(50)
+);
+
+set term ^;
+
+create trigger tr_employee_bi
+for employee before insert
+as
+begin
+  if (new.employee_id is null) then
+     new.employee_id = next value for gen_employee;
+end^
+
+set term ;^
+----
+
+Now let's try to execute the following script.
+
+.Script index_nullable.php
+[source%autofit,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TS_SQL = <<<'SQL'
+    INSERT INTO employee (employee_id, name, lastname)
+	VALUES (?, ?, ?)
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/test;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->prepare(TS_SQL);
+    $sth->execute([null, 'John', 'Smith']);
+    echo "OK\n";
+	
+	$cur_stmt = $dbh->prepare('select * from employee');
+	$cur_stmt->execute();
+	$rows = $cur_stmt->fetchAll(PDO::FETCH_ASSOC);
+	var_dump($rows);
+    $cur_stmt->closeCursor();
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+As a result we get:
+
+----
+PHP version: 8.3.11
+Error: SQLSTATE[HY105]: Invalid parameter type: -999 Parameter requires non-null value
+----
+
+The whole point is that the driver relies on the parameter information it receives in the SQLDA structure, where the first parameter is described as not nullable, since the `EMPLOYEE_ID` field is described as `NOT NULL`. But in fact, it is possible to pass the `NULL` value to this parameter, because there is a `tr_employee_bi` trigger that changes the value of the table columns before insertion. In general, the nullable flag is useful for output parameters, since it allows you to save on allocating memory for the NULL value indicator. But for input parameters, this behavior is rather harmful.
+
+If we try to execute the following query, it will be successful
+
+[source,sql]
+----
+INSERT INTO employee (employee_id, name, lastname)
+VALUES (null, 'John', 'Smith')
+----
+
+Since I started working on the pdo_firebird driver anyway, I decided to fix this problem too. Now let's try to do the same thing on PHP 8.4. Result:
+
+----
+PHP version: 8.4.0beta5
+OK
+array(1) {
+  [0]=>
+  array(3) {
+    ["EMPLOYEE_ID"]=>
+    int(2)
+    ["NAME"]=>
+    string(4) "John"
+    ["LASTNAME"]=>
+    string(5) "Smith"
+  }
+}
+----
+
+Now everything works as expected.
+
+== Transaction isolation mode
+
+As you know, by default PDO works in the automatic start and commit mode. In this case, immediately after connecting to the database, a default transaction is started. After executing any query, the transaction is automatically committed and a new transaction is started.
+
+To manually manage transactions, you need to disable the automatic commit mode. This can be done by setting the `PDO::ATTR_AUTOCOMMIT` attribute to `false`, after which transactions can be managed using the `beginTransaction`, `commit` and `rollback` methods. But it is impossible to pass transaction parameters to the `beginTransaction` method and change its isolation mode.
+
+Let's see what parameters a transaction starts with by default:
+
+[source%autofit,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TNX_PROP_SQL = <<<'SQL'
+    SELECT
+      TRIM(
+        CASE
+          WHEN T.MON$ISOLATION_MODE = 0 THEN 'CONSISTENCY'
+          WHEN T.MON$ISOLATION_MODE = 1 THEN 'CONCURRENCY'
+          WHEN T.MON$ISOLATION_MODE = 2 THEN 'READ COMMITTED RECORD VERSION'
+          WHEN T.MON$ISOLATION_MODE = 3 THEN 'READ COMMITTED NO RECORD VERSION'
+          WHEN T.MON$ISOLATION_MODE = 4 THEN 'READ COMMITTED READ CONSISTENCY'
+        END
+      ) AS ISOLATION_MODE,
+      TRIM(
+        CASE
+          WHEN T.MON$LOCK_TIMEOUT = 0 THEN 'NO WAIT'
+          ELSE 'WAIT'
+        END
+      ) AS WAIT_MODE,
+      CASE
+        WHEN T.MON$LOCK_TIMEOUT > 0 THEN MON$LOCK_TIMEOUT
+      END AS LOCK_TIMEOUT,
+      TRIM(
+        CASE
+          WHEN T.MON$READ_ONLY = 1 THEN 'READ ONLY'
+          WHEN T.MON$READ_ONLY = 0 THEN 'READ WRITE'
+        END
+      ) AS RW_MODE,
+      (T.MON$AUTO_COMMIT = 1) AS AUTO_COMMIT,
+      (T.MON$AUTO_UNDO = 1) AS AUTO_UNDO
+    FROM 
+      MON$TRANSACTIONS T
+    WHERE T.MON$TRANSACTION_ID = CURRENT_TRANSACTION
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $sth = $dbh->query(TNX_PROP_SQL);
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    $sth->closeCursor();
+    echo "Transaction property: \n";
+    var_dump($row);
+    echo "\n"; 
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+The result will be the following:
+
+----
+PHP version: 8.4.0beta5
+Transaction property:
+array(6) {
+  ["ISOLATION_MODE"]=>
+  string(31) "READ COMMITTED READ CONSISTENCY"
+  ["WAIT_MODE"]=>
+  string(4) "WAIT"
+  ["LOCK_TIMEOUT"]=>
+  NULL
+  ["RW_MODE"]=>
+  string(9) "READ WRITE"
+  ["AUTO_COMMIT"]=>
+  bool(false)
+  ["AUTO_UNDO"]=>
+  bool(true)
+}
+----
+
+To get around this problem, you can explicitly start transactions using the SQL statement `SET TRANSACTION`. Let's see how to do this.
+
+[source%autofit,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TNX_PROP_SQL = <<<'SQL'
+    SELECT
+      TRIM(
+        CASE
+          WHEN T.MON$ISOLATION_MODE = 0 THEN 'CONSISTENCY'
+          WHEN T.MON$ISOLATION_MODE = 1 THEN 'CONCURRENCY'
+          WHEN T.MON$ISOLATION_MODE = 2 THEN 'READ COMMITTED RECORD VERSION'
+          WHEN T.MON$ISOLATION_MODE = 3 THEN 'READ COMMITTED NO RECORD VERSION'
+          WHEN T.MON$ISOLATION_MODE = 4 THEN 'READ COMMITTED READ CONSISTENCY'
+        END
+      ) AS ISOLATION_MODE,
+      TRIM(
+        CASE
+          WHEN T.MON$LOCK_TIMEOUT = 0 THEN 'NO WAIT'
+          ELSE 'WAIT'
+        END
+      ) AS WAIT_MODE,
+      CASE
+        WHEN T.MON$LOCK_TIMEOUT > 0 THEN MON$LOCK_TIMEOUT
+      END AS LOCK_TIMEOUT,
+      TRIM(
+        CASE
+          WHEN T.MON$READ_ONLY = 1 THEN 'READ ONLY'
+          WHEN T.MON$READ_ONLY = 0 THEN 'READ WRITE'
+        END
+      ) AS RW_MODE,
+      (T.MON$AUTO_COMMIT = 1) AS AUTO_COMMIT,
+      (T.MON$AUTO_UNDO = 1) AS AUTO_UNDO
+    FROM 
+      MON$TRANSACTIONS T
+    WHERE T.MON$TRANSACTION_ID = CURRENT_TRANSACTION
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');   
+    // start transaction
+    $dbh->setAttribute(PDO::ATTR_AUTOCOMMIT, false);
+    $dbh->exec('SET TRANSACTION READ WRITE NO WAIT ISOLATION LEVEL SNAPSHOT');
+    // execute query
+    $sth = $dbh->query(TNX_PROP_SQL);
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    $sth->closeCursor();
+    echo "Transaction property: \n";
+    var_dump($row);
+    echo "\n"; 
+    // commit transaction
+    //$dbh->exec('COMMIT');
+    $dbh->commit();
+    $dbh->setAttribute(PDO::ATTR_AUTOCOMMIT, true);
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+The result will be the following:
+
+----
+PHP version: 8.3.11
+Transaction property:
+array(6) {
+  ["ISOLATION_MODE"]=>
+  string(11) "CONCURRENCY"
+  ["WAIT_MODE"]=>
+  string(7) "NO WAIT"
+  ["LOCK_TIMEOUT"]=>
+  NULL
+  ["RW_MODE"]=>
+  string(10) "READ WRITE"
+  ["AUTO_COMMIT"]=>
+  bool(false)
+  ["AUTO_UNDO"]=>
+  bool(true)
+}
+
+Error: There is no active transaction
+----
+
+We were able to change the transaction isolation level, but there were problems with transaction commit, using any of the methods.
+
+[NOTE]
+====
+I don't like this behavior, and maybe the next thing I'll do is fix it before the final version of PHP 8.4 is released.
+====
+
+Now let's see what opportunities the PHP 8.4 developers have provided us to change the transaction isolation level via connection attributes.
+
+In PHP 8.4, additional classes were added to the PDO namespace for PDO drivers, which provide additional attributes and methods for a specific driver. For the Firebird driver, such a class is called `PDO\Firebird`. It is described as follows:
+
+[source,php]
+----
+namespace Pdo;
+
+class Firebird extends \PDO
+{
+    // Attributes for date and time formats
+    public const int ATTR_DATE_FORMAT;
+    public const int ATTR_TIME_FORMAT;
+    public const int ATTR_TIMESTAMP_FORMAT;
+
+    public const int TRANSACTION_ISOLATION_LEVEL;
+
+    // Transaction isolation level
+    public const int READ_COMMITTED;
+    public const int REPEATABLE_READ;
+    public const int SERIALIZABLE;
+
+    public const int WRITABLE_TRANSACTION;
+
+    public static function getApiVersion(): int;
+}
+----
+
+The `PDO\Firebird::WRITABLE_TRANSACTION` attribute is used to set the transaction access mode to `READ ONLY` or `READ WRITE`, and the `PDO\Firebird::TRANSACTION_ISOLATION_LEVEL` attribute is used to switch the isolation mode. The isolation mode constants correspond to the following transaction parameters:
+
+- `PDO\Firebird::READ_COMMITTED` - `READ COMMITTED RECORD_VERSION`.In Firebird 4.0 and higher, if the `ReadConsistency = 1` configuration parameter, the isolation mode will be `READ COMMITTED READ CONSISTENCY`;
+- `PDO\Firebird::REPEATABLE_READ` - `SNAPSHOT`;
+- `PDO\Firebird::SERIALIZABLE` - `SNAPSHOT TABLE STABILITY`.
+
+Let's see how they can be used.
+
+[source%autofit,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TNX_PROP_SQL = <<<'SQL'
+    SELECT
+      TRIM(
+        CASE
+          WHEN T.MON$ISOLATION_MODE = 0 THEN 'CONSISTENCY'
+          WHEN T.MON$ISOLATION_MODE = 1 THEN 'CONCURRENCY'
+          WHEN T.MON$ISOLATION_MODE = 2 THEN 'READ COMMITTED RECORD VERSION'
+          WHEN T.MON$ISOLATION_MODE = 3 THEN 'READ COMMITTED NO RECORD VERSION'
+          WHEN T.MON$ISOLATION_MODE = 4 THEN 'READ COMMITTED READ CONSISTENCY'
+        END
+      ) AS ISOLATION_MODE,
+      TRIM(
+        CASE
+          WHEN T.MON$LOCK_TIMEOUT = 0 THEN 'NO WAIT'
+          ELSE 'WAIT'
+        END
+      ) AS WAIT_MODE,
+      CASE
+        WHEN T.MON$LOCK_TIMEOUT > 0 THEN MON$LOCK_TIMEOUT
+      END AS LOCK_TIMEOUT,
+      TRIM(
+        CASE
+          WHEN T.MON$READ_ONLY = 1 THEN 'READ ONLY'
+          WHEN T.MON$READ_ONLY = 0 THEN 'READ WRITE'
+        END
+      ) AS RW_MODE,
+      (T.MON$AUTO_COMMIT = 1) AS AUTO_COMMIT,
+      (T.MON$AUTO_UNDO = 1) AS AUTO_UNDO
+    FROM 
+      MON$TRANSACTIONS T
+    WHERE T.MON$TRANSACTION_ID = CURRENT_TRANSACTION
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO('firebird:dbname=inet://localhost/employee;charset=utf8', 'SYSDBA', 'masterkey');
+    $dbh->setAttribute(PDO::ATTR_AUTOCOMMIT, false);
+    $dbh->setAttribute(PDO\Firebird::TRANSACTION_ISOLATION_LEVEL, PDO\Firebird::REPEATABLE_READ);
+    $dbh->setAttribute(PDO\Firebird::WRITABLE_TRANSACTION, false);
+    // start transaction
+    $dbh->beginTransaction();
+    // execute query
+    $sth = $dbh->query(TNX_PROP_SQL);
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    $sth->closeCursor();
+    echo "Transaction property: \n";
+    var_dump($row);
+    echo "\n"; 
+    // commit transaction
+    $dbh->commit();
+    $dbh->setAttribute(PDO::ATTR_AUTOCOMMIT, true);
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+The result will be the following:
+
+----
+PHP version: 8.4.0beta5
+Transaction property:
+array(6) {
+  ["ISOLATION_MODE"]=>
+  string(11) "CONCURRENCY"
+  ["WAIT_MODE"]=>
+  string(4) "WAIT"
+  ["LOCK_TIMEOUT"]=>
+  NULL
+  ["RW_MODE"]=>
+  string(9) "READ ONLY"
+  ["AUTO_COMMIT"]=>
+  bool(false)
+  ["AUTO_UNDO"]=>
+  bool(true)
+}
+----
+
+In addition, these attributes can be applied directly when establishing a connection, and then even the default transaction that starts with the connection will change its parameters.
+
+[source%autofit,php]
+----
+<?php
+
+namespace MyApp;
+
+use PDO;
+use PDOException;
+use PDOStatement;
+
+const TNX_PROP_SQL = <<<'SQL'
+    SELECT
+      TRIM(
+        CASE
+          WHEN T.MON$ISOLATION_MODE = 0 THEN 'CONSISTENCY'
+          WHEN T.MON$ISOLATION_MODE = 1 THEN 'CONCURRENCY'
+          WHEN T.MON$ISOLATION_MODE = 2 THEN 'READ COMMITTED RECORD VERSION'
+          WHEN T.MON$ISOLATION_MODE = 3 THEN 'READ COMMITTED NO RECORD VERSION'
+          WHEN T.MON$ISOLATION_MODE = 4 THEN 'READ COMMITTED READ CONSISTENCY'
+        END
+      ) AS ISOLATION_MODE,
+      TRIM(
+        CASE
+          WHEN T.MON$LOCK_TIMEOUT = 0 THEN 'NO WAIT'
+          ELSE 'WAIT'
+        END
+      ) AS WAIT_MODE,
+      CASE
+        WHEN T.MON$LOCK_TIMEOUT > 0 THEN MON$LOCK_TIMEOUT
+      END AS LOCK_TIMEOUT,
+      TRIM(
+        CASE
+          WHEN T.MON$READ_ONLY = 1 THEN 'READ ONLY'
+          WHEN T.MON$READ_ONLY = 0 THEN 'READ WRITE'
+        END
+      ) AS RW_MODE,
+      (T.MON$AUTO_COMMIT = 1) AS AUTO_COMMIT,
+      (T.MON$AUTO_UNDO = 1) AS AUTO_UNDO
+    FROM 
+      MON$TRANSACTIONS T
+    WHERE T.MON$TRANSACTION_ID = CURRENT_TRANSACTION
+SQL;
+
+try {
+    echo 'PHP version: ' . phpversion() . "\n";
+    $dbh = new PDO(
+        'firebird:dbname=inet://localhost/employee;charset=utf8', 
+        'SYSDBA', 
+        'masterkey',
+        [
+          PDO\Firebird::WRITABLE_TRANSACTION => false
+        ] 
+    );
+    $sth = $dbh->query(TNX_PROP_SQL);
+    $row = $sth->fetch(PDO::FETCH_ASSOC);
+    $sth->closeCursor();
+    echo "Transaction property: \n";
+    var_dump($row);
+    echo "\n"; 
+}
+catch(PDOException $e) {
+    echo 'Error: ' . $e->getMessage() . "\n";
+}
+----
+
+The result will be the following:
+
+----
+PHP version: 8.4.0beta5
+Transaction property:
+array(6) {
+  ["ISOLATION_MODE"]=>
+  string(31) "READ COMMITTED READ CONSISTENCY"
+  ["WAIT_MODE"]=>
+  string(4) "WAIT"
+  ["LOCK_TIMEOUT"]=>
+  NULL
+  ["RW_MODE"]=>
+  string(9) "READ ONLY"
+  ["AUTO_COMMIT"]=>
+  bool(false)
+  ["AUTO_UNDO"]=>
+  bool(true)
+}
+----
+
+Now the transaction starts in `READ ONLY` mode by default.
+
+That's all I wanted to tell about how to work with modern versions of Firebird in PHP, and what improvements for this have occurred in PHP 8.4.
