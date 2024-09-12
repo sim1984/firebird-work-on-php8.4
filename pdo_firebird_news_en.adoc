@@ -1,7 +1,7 @@
 = PHP 8.4 improvements when working with modern Firebird versions
 Simonov Denis
 v1.0 by 2024-09-12
-:doctype: article
+:doctype: book
 :encoding: utf-8
 :lang: en
 :icons: font
@@ -20,8 +20,14 @@ endif::[]
 
 [dedication%notitle]
 --
+(c) Denis Simonov, edited and adjusted by Alexey Kovyazin
 
+This material is sponsored and created with the sponsorship and support of IBSurgeon https://www.ib-aid.com, vendor of HQbird (advanced distribution of Firebird) and supplier of performance optimization, migration and technical support services for Firebird.
+The material is licensed under Public Documentation License https://www.firebirdsql.org/file/documentation/html/en/licenses/pdl/public-documentation-license.html
 --
+
+[preface]
+== Preface
 
 The upcoming PHP 8.4 release, due out in late 2024, brings many new features and improvements, most notably property hooks (https://wiki.php.net/rfc/property-hooks[property hooks]) and HTML5 support in the DOM extension.
 

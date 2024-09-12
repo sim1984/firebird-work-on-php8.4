@@ -1,7 +1,7 @@
 = Улучшения PHP 8.4 при работе с современными версиями Firebird
 Симонов Денис
 v1.0 от 12.09.2024
-:doctype: article
+:doctype: book
 :encoding: utf-8
 :lang: ru
 :icons: font
@@ -30,8 +30,13 @@ endif::[]
 
 [dedication%notitle]
 --
+Этот материал был создан при поддержке и спонсорстве компании https://www.ibase.ru[iBase.ru], которая разрабатывает  инструменты Firebird SQL для предприятий и предоставляет сервис технической поддержки для Firebird SQL.
 
+Материал выпущен под лицензией Public Documentation License https://www.firebirdsql.org/file/documentation/html/en/licenses/pdl/public-documentation-license.html
 --
+
+[preface]
+== Предисловие
 
 Предстоящий релиз PHP 8.4, который должен выйти в конце 2024 года, содержит множество новых функций и улучшений, главные из которых обработчики свойств (https://wiki.php.net/rfc/property-hooks[property hooks]) и поддержка HTML5 а расширении DOM.
 
